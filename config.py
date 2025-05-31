@@ -44,15 +44,15 @@ SITES = [
     #     "output_subdir": "example_site"
     # }
     {
-        'name': '自訂網址: https://newsletters.raven.tw/t/b65',
+        'name': 'Decode AI 週報 - 知識管理',
         'base_domain': 'https://newsletters.raven.tw',
         'initial_url': 'https://newsletters.raven.tw/t/b65',
-        'output_subdir': 't_b65'
+        'output_subdir': 'DecodeAI週報_知識管理'
     },
     {
-        'name': '自訂網址: https://monica.im/help/zh-tw',
+        'name': 'Monica幫助中心',
         'base_domain': 'https://monica.im',
         'initial_url': 'https://monica.im/help/zh-tw',
-        'output_subdir': 'help_zh-tw'
+        'output_subdir': 'Monica幫助中心'
     },
 ] 
