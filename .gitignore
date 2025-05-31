@@ -1,0 +1,8 @@
+# 忽略 processed_data 和 result 資料夾
+/processed_data/
+/result/
+# 忽略 Python 快取
+__pycache__/
+*.py[cod]
+# 忽略 Cursor 規則資料夾
+/.cursor/rules/ 
