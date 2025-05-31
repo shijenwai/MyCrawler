@@ -1,8 +1,12 @@
 import asyncio
 import re
 import os
+import math
+import shutil
 from urllib.parse import urljoin, urlparse
 from crawl4ai import AsyncWebCrawler
+from crawl4ai import CrawlerRunConfig
+from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
 from config import SITES # 匯入網站設定
 
 # 確保 result 資料夾存在
@@ -34,28 +38,50 @@ async def main_crawl():
     print("請選擇要爬取的網站設定:")
     for i, site_config in enumerate(SITES):
         print(f"{i+1}. {site_config['name']}")
+    print(f"{len(SITES)+1}. 自訂網址")
 
     choice = -1
+    # 自訂網址寫入條目，待後續成功爬取後再加入
+    custom_config_entry = None
     while True:
         try:
-            choice_input = input(f"請輸入選項編號 (1-{len(SITES)}): ")
+            choice_input = input(f"請輸入選項編號 (1-{len(SITES)+1}): ")
             choice = int(choice_input) - 1
-            if 0 <= choice < len(SITES):
+            if 0 <= choice <= len(SITES):
                 break
             else:
                 print("輸入無效，請重新輸入。")
         except ValueError:
             print("輸入的不是數字，請重新輸入。")
 
-    selected_site = SITES[choice]
-    base_domain = selected_site["base_domain"]
-    initial_url = selected_site["initial_url"]
-    output_subdir = selected_site["output_subdir"]
+    if choice < len(SITES):
+        selected_site = SITES[choice]
+        base_domain = selected_site["base_domain"]
+        initial_url = selected_site["initial_url"]
+        output_subdir = selected_site["output_subdir"]
+    else:
+        custom_url = input("請輸入要爬取的網址: ")
+        parsed = urlparse(custom_url)
+        base_domain = f"{parsed.scheme}://{parsed.netloc}"
+        initial_url = custom_url
+        filename = sanitize_filename(custom_url)
+        output_subdir = os.path.splitext(filename)[0]
+        selected_site = {"name": f"自訂網址: {custom_url}"}
+        # 暫不寫入 config.py，待爬取成功後再加入
+        custom_config_entry = f"""    {{
+        'name': '自訂網址: {custom_url}',
+        'base_domain': '{base_domain}',
+        'initial_url': '{initial_url}',
+        'output_subdir': '{output_subdir}'
+    }},
+"""
 
     # 根據選擇的網站設定專用的輸出子目錄
     current_output_dir = os.path.join(BASE_OUTPUT_DIR, output_subdir)
-    if not os.path.exists(current_output_dir):
-        os.makedirs(current_output_dir)
+    # 若已存在則清除舊資料
+    if os.path.exists(current_output_dir):
+        shutil.rmtree(current_output_dir)
+    os.makedirs(current_output_dir)
     
     print(f"\n將爬取網站: {selected_site['name']}")
     print(f"初始 URL: {initial_url}")
@@ -90,83 +116,51 @@ async def main_crawl():
     print(f"將爬取所有以 \"{crawl_scope_prefix}\" 開頭的連結。")
     # --- END 計算爬取範圍的路徑前綴 ---
 
-    urls_to_crawl_initially = {initial_url}
-    all_found_urls = set() # 用於收集所有從 Markdown 中找到的合格 URL
-    processed_urls = set() # 追蹤已處理的 URL，避免重複爬取
+    # 直接讓使用者輸入爬取深度
+    while True:
+        try:
+            choice_depth = int(input("請輸入要爬幾層 (0 表示單頁): "))
+            if choice_depth >= 0:
+                break
+            print("輸入無效，請重新輸入。")
+        except ValueError:
+            print("輸入的不是數字，請重新輸入。")
 
     async with AsyncWebCrawler() as crawler:
-        # 第一輪：爬取初始 URL
-        for url in list(urls_to_crawl_initially): # 使用 list 複製，因集合可能在迭代中修改
-            if url in processed_urls:
-                continue
-            
-            print(f"開始爬取: {url}")
-            processed_urls.add(url)
-            try:
-                result = await crawler.arun(url=url)
-                if result and hasattr(result, 'markdown') and result.markdown:
-                    filename = sanitize_filename(url) # 這裡的 sanitize_filename 可能需要感知 crawl_scope_prefix 來產生更簡潔的檔名
-                    filepath = os.path.join(current_output_dir, filename)
-                    with open(filepath, 'w', encoding='utf-8') as f:
-                        f.write(result.markdown)
-                    print(f"Markdown 內容已儲存到: {filepath}")
-
-                    # 從已儲存的 Markdown 內容中提取連結
-                    # 更新正則，使其更通用地捕獲以 base_domain 開頭的連結
-                    pattern = r'\(' + f'({re.escape(base_domain)}[^)\s]*)' + r'\)'
-                    markdown_links = re.findall(pattern, result.markdown)
-
-                    for md_link_match in markdown_links:
-                        full_url = md_link_match.strip()
-                        # 移除 URL fragment
-                        full_url = urljoin(full_url, urlparse(full_url).path)
-
-
-                        if full_url not in processed_urls and full_url not in all_found_urls:
-                            # 確保連結是我們感興趣的域名和定義的路徑前綴下的
-                            if full_url.startswith(crawl_scope_prefix):
-                                print(f"從 Markdown 找到合格連結: {full_url}")
-                                all_found_urls.add(full_url)
-                            # else:
-                            #     print(f"忽略連結 (不在範圍 {crawl_scope_prefix}): {full_url}")
-                else:
-                    print(f"警告: 頁面 {url} 未獲取到 Markdown 內容或爬取失敗。")
-            except Exception as e:
-                print(f"爬取頁面 {url} 過程中發生錯誤: {e}")
-
-        # 第二輪：爬取從 Markdown 中找到的新連結
-        urls_for_second_pass = list(all_found_urls - processed_urls) # 只爬取尚未處理的新連結
-
-        if urls_for_second_pass:
-            print(f"\n將開始爬取 {len(urls_for_second_pass)} 個從 Markdown 找到的新頁面...")
-        
-        for i, url in enumerate(urls_for_second_pass):
-            if url in processed_urls:
-                continue
-
-            print(f"\n開始爬取 (第二輪: {i+1}/{len(urls_for_second_pass)}): {url}")
-            processed_urls.add(url)
-            try:
-                result = await crawler.arun(url=url)
-                if result and hasattr(result, 'markdown') and result.markdown:
-                    filename = sanitize_filename(url) # 同上，檔名生成可優化
-                    filepath = os.path.join(current_output_dir, filename)
-                    with open(filepath, 'w', encoding='utf-8') as f:
-                        f.write(result.markdown)
-                    print(f"Markdown 內容已儲存到: {filepath}")
-                    # 理論上這裡也可以再從新爬取的頁面提取連結，形成遞歸爬取
-                    # 但為了簡單起見，目前只做兩層 (初始層 + 從初始層 Markdown 提取的連結)
-                else:
-                    print(f"警告: 頁面 {url} 未獲取到 Markdown 內容或爬取失敗。")
-            except Exception as e:
-                print(f"爬取頁面 {url} 過程中發生錯誤: {e}")
-
-    if not all_found_urls and len(processed_urls) <= len(urls_to_crawl_initially):
-         print(f"\n爬取完成。只處理了初始頁面，未從其 Markdown 中找到新的合格連結。檔案已儲存到 {current_output_dir} 資料夾。")
-    elif not urls_for_second_pass and all_found_urls:
-        print(f"\n爬取完成。處理了初始頁面並從其 Markdown 中找到連結 ({len(all_found_urls)} 個)，但所有這些連結都已在第一輪處理或不符合進一步爬取條件。檔案已儲存到 {current_output_dir} 資料夾。")
-    else:
-        print(f"\n爬取完成 ({len(processed_urls)} 個頁面)。Markdown 檔案已儲存到 {current_output_dir} 資料夾。")
+        config_crawl = CrawlerRunConfig(
+            deep_crawl_strategy=BFSDeepCrawlStrategy(max_depth=choice_depth, include_external=False),
+            verbose=True,
+            stream=True
+        )
+        # 計算成功爬取次數並顯示分層日誌
+        success_count = 0
+        current_depth = -1
+        async for result in await crawler.arun(initial_url, config=config_crawl):
+            depth = result.metadata.get('depth', 0)
+            if depth != current_depth:
+                current_depth = depth
+                print(f"第{current_depth}層開始...")
+            if hasattr(result, 'markdown') and result.markdown:
+                success_count += 1
+                filename = sanitize_filename(result.url)
+                filepath = os.path.join(current_output_dir, filename)
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(result.markdown)
+                print(f"Markdown 已儲存: {filepath}")
+            else:
+                print(f"警告: {result.url} 無 Markdown 或爬取失敗。")
+        # 自訂網址且爬取成功才寫入 config.py
+        if custom_config_entry and success_count > 0:
+            with open('config.py', 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            for idx in range(len(lines)-1, -1, -1):
+                if lines[idx].strip() == ']':
+                    insert_idx = idx
+                    break
+            lines.insert(insert_idx, custom_config_entry)
+            with open('config.py', 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+            print("自訂網址已成功加入 config.py")
 
 if __name__ == "__main__":
     asyncio.run(main_crawl()) 
